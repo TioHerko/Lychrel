@@ -9,7 +9,7 @@ Arithmetic is arbitrary-precision (decimal digit arrays added in base-10000 chun
 - **lychrel**: command-line tool (`crunch/`)
 - **LychrelGUI**: SwiftUI macOS app (`LychrelGUI/`)
 
-Both share the same core logic. `LychrelCore.swift` exists as an identical copy in each folder, so keep the two in sync when editing.
+Both link the shared core logic from **LychrelKit** (`LychrelKit/`), a local Swift package. Its `Package.swift` builds the core optimized even in Debug, since the SIMD code is several times slower unoptimized.
 
 ## Command-line usage
 

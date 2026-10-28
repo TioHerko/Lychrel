@@ -8,6 +8,7 @@
 import SwiftUI
 import AppKit
 import UniformTypeIdentifiers
+import LychrelKit
 
 private func defaultCSVPath() -> String {
     let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first

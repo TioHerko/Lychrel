@@ -1,4 +1,5 @@
 import Foundation
+import LychrelKit
 
 let defaultLowerBound = 1
 let defaultUpperBound = 1_000_000

@@ -1,4 +1,3 @@
-// Duplicate of crunch/LychrelCore.swift — keep both copies in sync.
 import Foundation
 import os
 
@@ -81,24 +80,24 @@ nonisolated func add(_ a: Digits, _ b: Digits) -> Digits {
     return result
 }
 
-nonisolated struct CheckResult: Sendable {
-    let number: Int
-    let palindrome: String
-    let steps: Int
-    let overflowed: Bool
-    let exceededMaxIter: Bool
+public nonisolated struct CheckResult: Sendable {
+    public let number: Int
+    public let palindrome: String
+    public let steps: Int
+    public let overflowed: Bool
+    public let exceededMaxIter: Bool
 
     static let placeholder = CheckResult(number: 0, palindrome: "", steps: 0, overflowed: false, exceededMaxIter: false)
 }
 
 // Selectable implementation of the reverse-and-add loop.
-nonisolated enum Algorithm: String, CaseIterable, Identifiable, Sendable {
+public nonisolated enum Algorithm: String, CaseIterable, Identifiable, Sendable {
     case digitArray
     case packedBCD
 
-    var id: String { rawValue }
+    public var id: String { rawValue }
 
-    var displayName: String {
+    public var displayName: String {
         switch self {
         case .digitArray: "Digit array"
         case .packedBCD: "Packed BCD"
@@ -106,7 +105,7 @@ nonisolated enum Algorithm: String, CaseIterable, Identifiable, Sendable {
     }
 }
 
-nonisolated func check(_ x: Int, maxIterations: Int, algorithm: Algorithm = .packedBCD) -> CheckResult {
+public nonisolated func check(_ x: Int, maxIterations: Int, algorithm: Algorithm = .packedBCD) -> CheckResult {
     switch algorithm {
     case .digitArray: checkDigitArray(x, maxIterations: maxIterations)
     case .packedBCD: checkPackedBCD(x, maxIterations: maxIterations)
@@ -377,7 +376,7 @@ nonisolated func checkPackedBCD(_ x: Int, maxIterations: Int) -> CheckResult {
     }
 }
 
-nonisolated func renderProgressBar(completed: Int, total: Int, width: Int = 30) -> String {
+public nonisolated func renderProgressBar(completed: Int, total: Int, width: Int = 30) -> String {
     let fraction = total > 0 ? Double(completed) / Double(total) : 1.0
     let filled = Int(fraction * Double(width))
     let bar = String(repeating: "#", count: filled) + String(repeating: "-", count: width - filled)
@@ -387,25 +386,26 @@ nonisolated func renderProgressBar(completed: Int, total: Int, width: Int = 30) 
 
 // Thread-safe cancellation signal: read from many concurrent background
 // closures, written once from whichever thread owns the Cancel action.
-nonisolated final class CancellationFlag: Sendable {
+public nonisolated final class CancellationFlag: Sendable {
     private let state = OSAllocatedUnfairLock(initialState: false)
-    var isCancelled: Bool { state.withLock { $0 } }
-    func cancel() { state.withLock { $0 = true } }
+    public init() {}
+    public var isCancelled: Bool { state.withLock { $0 } }
+    public func cancel() { state.withLock { $0 = true } }
 }
 
-nonisolated struct RunProgress: Sendable {
-    let completed: Int
-    let total: Int
-    let currentNumber: Int
-    let exceeded: Int
+public nonisolated struct RunProgress: Sendable {
+    public let completed: Int
+    public let total: Int
+    public let currentNumber: Int
+    public let exceeded: Int
 }
 
-nonisolated struct RunOutcome: Sendable {
-    let results: [CheckResult]
-    let completed: Int
-    let exceeded: Int
-    let wasCancelled: Bool
-    var palindromes: Int { completed - exceeded }
+public nonisolated struct RunOutcome: Sendable {
+    public let results: [CheckResult]
+    public let completed: Int
+    public let exceeded: Int
+    public let wasCancelled: Bool
+    public var palindromes: Int { completed - exceeded }
 }
 
 fileprivate nonisolated struct ProgressCounts: Sendable {
@@ -421,7 +421,7 @@ fileprivate nonisolated struct ResultSink: @unchecked Sendable {
 
 // Runs the Lychrel check for every number in lowerBound...upperBound across
 // all available cores, reporting throttled progress and honoring cancellation.
-nonisolated func runChecks(
+public nonisolated func runChecks(
     lowerBound: Int,
     upperBound: Int,
     maxIterations: Int,
@@ -470,14 +470,14 @@ nonisolated func csvString(for results: [CheckResult]) -> String {
     return lines.joined(separator: "\n") + "\n"
 }
 
-nonisolated func writeCSV(_ results: [CheckResult], toPath path: String) throws {
+public nonisolated func writeCSV(_ results: [CheckResult], toPath path: String) throws {
     try csvString(for: results).write(toFile: path, atomically: true, encoding: .utf8)
 }
 
 // Formats a Duration to 5 significant digits, picking a unit (s/ms/µs/ns) so the
 // value stays readable instead of falling into scientific notation or a long
 // string of leading zeros.
-nonisolated func formatDuration(_ duration: Duration) -> String {
+public nonisolated func formatDuration(_ duration: Duration) -> String {
     let components = duration.components
     let seconds = Double(components.seconds) + Double(components.attoseconds) / 1e18
     if seconds >= 1 {
