@@ -49,11 +49,14 @@ final class RunModel {
         let clock = ContinuousClock()
 
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            // Snapshot the weak reference into a constant so the nested Tasks
+            // capture an immutable value rather than the mutable weak variable.
+            let model = self
             var outcome: RunOutcome!
             let calcDuration = clock.measure {
                 outcome = runChecks(lowerBound: lowerBound, upperBound: upperBound, maxIterations: maxIterations, algorithm: algorithm, cancellation: flag) { progress in
                     Task { @MainActor in
-                        self?.apply(progress, id: id)
+                        model?.apply(progress, id: id)
                     }
                 }
             }
@@ -94,7 +97,7 @@ final class RunModel {
             )
 
             Task { @MainActor in
-                self?.finish(summary, id: id)
+                model?.finish(summary, id: id)
             }
         }
     }
