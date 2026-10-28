@@ -90,7 +90,29 @@ nonisolated struct CheckResult: Sendable {
     static let placeholder = CheckResult(number: 0, palindrome: "", steps: 0, overflowed: false, exceededMaxIter: false)
 }
 
-nonisolated func check(_ x: Int, maxIterations: Int) -> CheckResult {
+// Selectable implementation of the reverse-and-add loop.
+nonisolated enum Algorithm: String, CaseIterable, Identifiable, Sendable {
+    case digitArray
+    case packedBCD
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .digitArray: "Digit array"
+        case .packedBCD: "Packed BCD"
+        }
+    }
+}
+
+nonisolated func check(_ x: Int, maxIterations: Int, algorithm: Algorithm = .packedBCD) -> CheckResult {
+    switch algorithm {
+    case .digitArray: checkDigitArray(x, maxIterations: maxIterations)
+    case .packedBCD: checkPackedBCD(x, maxIterations: maxIterations)
+    }
+}
+
+nonisolated func checkDigitArray(_ x: Int, maxIterations: Int) -> CheckResult {
     var current = digits(of: x)
     var iterations = 0
     while !isPalindrome(current)
@@ -103,6 +125,108 @@ nonisolated func check(_ x: Int, maxIterations: Int) -> CheckResult {
         current = add(current, reversed(current))
     }
     return CheckResult(number: x, palindrome: decimalString(from: current), steps: iterations, overflowed: false, exceededMaxIter: false)
+}
+
+// MARK: - Packed BCD
+//
+// Numbers are stored as UInt64 words, least-significant word first, with 16
+// decimal digits per word (one per nibble, digit 0 in the low nibble). The top
+// word is always non-zero (except for the number 0).
+
+private nonisolated let bcdSixes: UInt64 = 0x6666_6666_6666_6666
+private nonisolated let bcdNibbleLows: UInt64 = 0x1111_1111_1111_1110
+private nonisolated let bcdByteLows: UInt64 = 0x0F0F_0F0F_0F0F_0F0F
+
+// Reverses the order of the 16 nibbles in a word.
+@inline(__always)
+private nonisolated func nibbleReversed(_ x: UInt64) -> UInt64 {
+    let s = x.byteSwapped
+    return ((s & bcdByteLows) << 4) | ((s >> 4) & bcdByteLows)
+}
+
+// Adds two 16-digit BCD words plus a carry-in (0 or 1) with a handful of
+// integer ops: pre-add 6 to every digit so decimal carries become binary
+// carries, then take the 6 back off the digits that didn't carry.
+@inline(__always)
+private nonisolated func bcdAdd(_ a: UInt64, _ b: UInt64, carryIn: UInt64) -> (sum: UInt64, carryOut: UInt64) {
+    let (t1, o1) = a.addingReportingOverflow(bcdSixes)
+    let (t2a, o2) = t1.addingReportingOverflow(b)
+    let (t2, o3) = t2a.addingReportingOverflow(carryIn)
+    let carryOut: UInt64 = (o1 || o2 || o3) ? 1 : 0
+    // Bit 4i set => no carry into nibble i => nibble i-1 needs its 6 removed.
+    let noCarry = ~(t2 ^ t1 ^ b) & bcdNibbleLows
+    var correction = (noCarry >> 2) | (noCarry >> 3)
+    if carryOut == 0 { correction |= 0x6000_0000_0000_0000 }
+    return (t2 &- correction, carryOut)
+}
+
+// Writes the digit-reversal of `src` (`count` words) into `dst` (`count` words).
+// Reversing the whole 16*count-nibble field and shifting right by the unused
+// top nibbles gives the reversal of the actual number; the original's trailing
+// zeros become high zeros, so no separate trimming is needed.
+@inline(__always)
+private nonisolated func reverseBCD(_ src: UnsafePointer<UInt64>, count: Int, into dst: UnsafeMutablePointer<UInt64>) {
+    let shift = src[count - 1].leadingZeroBitCount / 4 * 4
+    for j in 0..<count {
+        let low = nibbleReversed(src[count - 1 - j])
+        let high = j + 1 < count ? nibbleReversed(src[count - 2 - j]) : 0
+        dst[j] = (low >> shift) | (high << (64 - shift))
+    }
+}
+
+nonisolated func checkPackedBCD(_ x: Int, maxIterations: Int) -> CheckResult {
+    // Each add grows the number by at most one digit, and Int has at most 19.
+    let capacity = (19 + maxIterations) / 16 + 2
+
+    return withUnsafeTemporaryAllocation(of: UInt64.self, capacity: capacity * 2) { buffer in
+        let current = buffer.baseAddress!
+        let reversed = current + capacity
+
+        var count = 0
+        var value = x
+        repeat {
+            var word: UInt64 = 0
+            for k in 0..<16 {
+                word |= UInt64(value % 10) << UInt64(4 * k)
+                value /= 10
+            }
+            current[count] = word
+            count += 1
+        } while value > 0
+
+        var iterations = 0
+        while true {
+            reverseBCD(current, count: count, into: reversed)
+
+            var isPalindrome = true
+            for j in 0..<count where current[j] != reversed[j] {
+                isPalindrome = false
+                break
+            }
+            if isPalindrome { break }
+
+            iterations += 1
+            if iterations > maxIterations {
+                return CheckResult(number: x, palindrome: "", steps: iterations, overflowed: false, exceededMaxIter: true)
+            }
+
+            var carry: UInt64 = 0
+            for j in 0..<count {
+                (current[j], carry) = bcdAdd(current[j], reversed[j], carryIn: carry)
+            }
+            if carry != 0 {
+                current[count] = 1
+                count += 1
+            }
+        }
+
+        var text = String(current[count - 1], radix: 16)
+        for j in stride(from: count - 2, through: 0, by: -1) {
+            let word = String(current[j], radix: 16)
+            text += String(repeating: "0", count: 16 - word.count) + word
+        }
+        return CheckResult(number: x, palindrome: text, steps: iterations, overflowed: false, exceededMaxIter: false)
+    }
 }
 
 nonisolated func renderProgressBar(completed: Int, total: Int, width: Int = 30) -> String {
@@ -153,6 +277,7 @@ nonisolated func runChecks(
     lowerBound: Int,
     upperBound: Int,
     maxIterations: Int,
+    algorithm: Algorithm = .packedBCD,
     progressStride: Int? = nil,
     cancellation: CancellationFlag? = nil,
     onProgress: @escaping @Sendable (RunProgress) -> Void
@@ -168,7 +293,7 @@ nonisolated func runChecks(
             if cancellation?.isCancelled == true { return }
 
             let x = lowerBound + i
-            let result = check(x, maxIterations: maxIterations)
+            let result = check(x, maxIterations: maxIterations, algorithm: algorithm)
             sink.base[i] = result
 
             counts.withLock { c in

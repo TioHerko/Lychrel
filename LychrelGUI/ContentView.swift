@@ -119,6 +119,7 @@ struct ContentView: View {
     @AppStorage("maxIterations") private var maxText = "1000"
     @AppStorage("csvPath") private var csvPath = defaultCSVPath()
     @AppStorage("useThousandsSeparators") private var useCommas = false
+    @AppStorage("algorithm") private var algorithmRaw = Algorithm.packedBCD.rawValue
 
     @State private var model = RunModel()
 
@@ -130,6 +131,13 @@ struct ContentView: View {
     }
     private var maxDigits: Binding<String> {
         Binding(get: { maxText.filter { $0.isNumber } }, set: { maxText = $0 })
+    }
+
+    private var algorithm: Binding<Algorithm> {
+        Binding(
+            get: { Algorithm(rawValue: algorithmRaw) ?? .packedBCD },
+            set: { algorithmRaw = $0.rawValue }
+        )
     }
 
     private var lowerBound: Int? { parsedPositiveInt(lowerText) }
@@ -187,6 +195,15 @@ struct ContentView: View {
                             .padding(.leading, rowLabelWidth + 8)
                     }
 
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        Text("Algorithm").frame(width: rowLabelWidth, alignment: .leading)
+                        Picker("Algorithm", selection: algorithm) {
+                            ForEach(Algorithm.allCases) { Text($0.displayName).tag($0) }
+                        }
+                        .pickerStyle(.radioGroup)
+                        .labelsHidden()
+                    }
+
                     HStack(spacing: 8) {
                         Text("CSV output").frame(width: rowLabelWidth, alignment: .leading)
                         TextField("Path", text: $csvPath)
@@ -221,7 +238,7 @@ struct ContentView: View {
             }
 
             HStack {
-                Button("Start") { model.start(lowerBound: lowerBound!, upperBound: upperBound!, maxIterations: maxIterations!, csvPath: csvPath) }
+                Button("Start") { model.start(lowerBound: lowerBound!, upperBound: upperBound!, maxIterations: maxIterations!, algorithm: algorithm.wrappedValue, csvPath: csvPath) }
                     .keyboardShortcut(.defaultAction)
                     .disabled(!canStart)
 
@@ -252,6 +269,7 @@ struct ContentView: View {
             Text("Cancelled after \(summary.checked) of \(summary.total) — no CSV written.")
         } else {
             Text("Checked \(summary.total) numbers from \(summary.lowerBound) to \(summary.upperBound) (max \(summary.maxIterations) iterations each).")
+            statRow("Algorithm", summary.algorithm.displayName)
             statRow("Palindromes found", "\(summary.palindromes)")
             statRow("Lychrel numbers found", "\(summary.exceeded)")
             statRow("Calc phase", formatDuration(summary.calc))

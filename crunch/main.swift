@@ -25,12 +25,13 @@ let lowerBound = intArg(named: "-lower", default: defaultLowerBound)
 let upperBound = intArg(named: "-bound", default: defaultUpperBound)
 let maxIterations = intArg(named: "-max", default: defaultMaxIterations)
 let csvPath = stringArg(named: "-csv", default: defaultCSVPath)
+let algorithm = Algorithm(rawValue: stringArg(named: "-algo", default: Algorithm.packedBCD.rawValue)) ?? .packedBCD
 
 let clock = ContinuousClock()
 
 var outcome: RunOutcome!
 let calcDuration = clock.measure {
-    outcome = runChecks(lowerBound: lowerBound, upperBound: upperBound, maxIterations: maxIterations) { p in
+    outcome = runChecks(lowerBound: lowerBound, upperBound: upperBound, maxIterations: maxIterations, algorithm: algorithm) { p in
         let bar = renderProgressBar(completed: p.completed, total: p.total)
         print("\rChecking \(p.currentNumber) \(bar) exceeded maxiter: \(p.exceeded)", terminator: "")
         fflush(stdout)
@@ -49,6 +50,7 @@ let writeDuration = clock.measure {
 }
 
 print("Checked \(outcome.completed) numbers from \(lowerBound) to \(upperBound) (max \(maxIterations) iterations each).")
+print("Algorithm: \(algorithm.displayName)")
 print("Palindromes found: \(outcome.palindromes)")
 print("Exceeded max iterations: \(outcome.exceeded)")
 print("Calc phase: \(formatDuration(calcDuration))")

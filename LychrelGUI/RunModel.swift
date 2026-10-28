@@ -7,6 +7,7 @@ struct RunSummary {
     let total: Int
     let checked: Int
     let maxIterations: Int
+    let algorithm: Algorithm
     let palindromes: Int
     let exceeded: Int
     let wasCancelled: Bool
@@ -31,7 +32,7 @@ final class RunModel {
     private var cancellation: CancellationFlag?
     private var runID = 0
 
-    func start(lowerBound: Int, upperBound: Int, maxIterations: Int, csvPath: String) {
+    func start(lowerBound: Int, upperBound: Int, maxIterations: Int, algorithm: Algorithm, csvPath: String) {
         runID += 1
         let id = runID
         let flag = CancellationFlag()
@@ -50,7 +51,7 @@ final class RunModel {
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             var outcome: RunOutcome!
             let calcDuration = clock.measure {
-                outcome = runChecks(lowerBound: lowerBound, upperBound: upperBound, maxIterations: maxIterations, cancellation: flag) { progress in
+                outcome = runChecks(lowerBound: lowerBound, upperBound: upperBound, maxIterations: maxIterations, algorithm: algorithm, cancellation: flag) { progress in
                     Task { @MainActor in
                         self?.apply(progress, id: id)
                     }
@@ -81,6 +82,7 @@ final class RunModel {
                 total: upperBound - lowerBound + 1,
                 checked: outcome.completed,
                 maxIterations: maxIterations,
+                algorithm: algorithm,
                 palindromes: outcome.palindromes,
                 exceeded: outcome.exceeded,
                 wasCancelled: outcome.wasCancelled,
