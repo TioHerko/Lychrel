@@ -132,7 +132,9 @@ nonisolated func checkDigitArray(_ x: Int, maxIterations: Int) -> CheckResult {
 //
 // Numbers are stored as UInt64 words, least-significant word first, with 16
 // decimal digits per word (one per nibble, digit 0 in the low nibble). The top
-// word is always non-zero (except for the number 0).
+// word is always non-zero (except for the number 0), and every word past the top
+// is zero. The hot loop works on SIMD2<UInt64> pairs of words, so each vector op
+// handles 32 digits in one 128-bit NEON register.
 
 private nonisolated let bcdSixes: UInt64 = 0x6666_6666_6666_6666
 private nonisolated let bcdNibbleLows: UInt64 = 0x1111_1111_1111_1110
@@ -161,27 +163,175 @@ private nonisolated func bcdAdd(_ a: UInt64, _ b: UInt64, carryIn: UInt64) -> (s
     return (t2 &- correction, carryOut)
 }
 
-// Writes the digit-reversal of `src` (`count` words) into `dst` (`count` words).
-// Reversing the whole 16*count-nibble field and shifting right by the unused
-// top nibbles gives the reversal of the actual number; the original's trailing
-// zeros become high zeros, so no separate trimming is needed.
+// Number of zero words that must sit below `src` for reverseAndAddBCD's reads.
+private nonisolated let bcdPadWords = 4
+
+// Numbers up to this many words take the scalar path: a vector pass has a fixed
+// latency that only pays off once there are enough pairs to fill it. Measured
+// on an M4 Max, scalar wins up to 6 words and SIMD from about 10.
+private nonisolated let bcdScalarMaxWords = 6
+
+// Scalar version of reverseAndAddBCD, with the same contract. Reversing the
+// whole 16*count-nibble field and shifting right by the unused top nibbles
+// gives the reversal of the actual number; the original's trailing zeros become
+// high zeros, so no separate trimming is needed.
 @inline(__always)
-private nonisolated func reverseBCD(_ src: UnsafePointer<UInt64>, count: Int, into dst: UnsafeMutablePointer<UInt64>) {
+private nonisolated func reverseAndAddScalar(_ src: UnsafeMutablePointer<UInt64>, count: Int, into dst: UnsafeMutablePointer<UInt64>) -> Bool {
     let shift = src[count - 1].leadingZeroBitCount / 4 * 4
+    var difference: UInt64 = 0
+    var carry: UInt64 = 0
+    var low = nibbleReversed(src[count - 1])
     for j in 0..<count {
-        let low = nibbleReversed(src[count - 1 - j])
-        let high = j + 1 < count ? nibbleReversed(src[count - 2 - j]) : 0
-        dst[j] = (low >> shift) | (high << (64 - shift))
+        // Word j of the reversal is nibble-reversed word count-1-j shifted down,
+        // topped up from word count-2-j (the zero pad word below src for the last).
+        let high = nibbleReversed(src[count - 2 - j])
+        let a = src[j]
+        let b = (low >> shift) | (high << (64 - shift))
+        difference |= a ^ b
+        (dst[j], carry) = bcdAdd(a, b, carryIn: carry)
+        low = high
     }
+    dst[count] = carry
+    return difference == 0
+}
+
+// Reverses all 32 nibbles of a word pair, so lane 0 gets the nibble-reversal of
+// lane 1 and vice versa. Compiles to rev64 + ext + shl + usra.
+@inline(__always)
+private nonisolated func nibbleReversedPair(_ v: SIMD2<UInt64>) -> SIMD2<UInt64> {
+    let b = unsafeBitCast(v, to: SIMD16<UInt8>.self)
+    let r = SIMD16(b[15], b[14], b[13], b[12], b[11], b[10], b[9], b[8], b[7], b[6], b[5], b[4], b[3], b[2], b[1], b[0])
+    return unsafeBitCast((r &<< 4) | (r &>> 4), to: SIMD2<UInt64>.self)
+}
+
+// One fused pass that checks whether `src` (`count` words) is a palindrome and
+// writes src + reverse(src) to `dst` (`count` + 1 words, the top one 0 or 1),
+// two words per SIMD op. `src` and `dst` must be 16-byte aligned, with
+// `bcdPadWords` zero words below `src` and zeros in src[count] and
+// src[count + 1]; writes up to dst[count + 1]. Numbers of up to
+// `bcdScalarMaxWords` words go through reverseAndAddScalar instead.
+//
+// Each word's carry-in is taken to be the carry-out the word below would have
+// with no carry-in of its own, which lets every pair be added independently.
+// That only goes wrong when a word's digit sums are all exactly 9 and a carry
+// arrives, which is detected and the pass redone with reverseAndAddScalar.
+private nonisolated func reverseAndAddBCD(_ src: UnsafeMutablePointer<UInt64>, count: Int, into dst: UnsafeMutablePointer<UInt64>) -> Bool {
+    if count <= bcdScalarMaxWords {
+        return reverseAndAddScalar(src, count: count, into: dst)
+    }
+    return count & 1 == 0
+        ? reverseAndAddPairs(src, count: count, into: dst, oddCount: false)
+        : reverseAndAddPairs(src, count: count, into: dst, oddCount: true)
+}
+
+// reverseAndAddBCD's loop, inlined once per parity so `oddCount` is a constant.
+@inline(__always)
+private nonisolated func reverseAndAddPairs(_ src: UnsafeMutablePointer<UInt64>, count: Int, into dst: UnsafeMutablePointer<UInt64>, oddCount: Bool) -> Bool {
+    let rawSrc = UnsafeRawPointer(src)
+    let rawDst = UnsafeMutableRawPointer(dst)
+    @inline(__always) func pair(at i: Int) -> SIMD2<UInt64> {
+        rawSrc.loadUnaligned(fromByteOffset: i &* 8, as: SIMD2<UInt64>.self)
+    }
+
+    // Same reversal as reverseAndAddScalar: word j of the reversal is the
+    // nibble-reversed word count-1-j shifted right by the unused top nibbles,
+    // topped up from word count-2-j. The left shift is split as 1 + (63 - shift)
+    // so that a shift of 0 clears the high part instead of wrapping to 0.
+    let shift = UInt64(src[count - 1].leadingZeroBitCount / 4 * 4)
+    let lowShift = SIMD2(repeating: shift)
+    let highShift = SIMD2(repeating: 63 &- shift)
+    let sixes = SIMD2(repeating: bcdSixes)
+    let nibbleLows = SIMD2(repeating: bcdNibbleLows)
+    let topSixes = SIMD2<UInt64>(repeating: 0x6000_0000_0000_0000)
+    let zero = SIMD2<UInt64>()
+
+    // Pair p covers words 2p and 2p+1, and the pairs reach word `count`, which
+    // takes the carry-out. Word j of the reversal is built from nibble-reversed
+    // words count-1-j, count-2-j and count-3-j, read only as aligned pairs so
+    // each load lines up with a single store from the previous pass and can be
+    // forwarded from it. With an odd count the words needed straddle aligned
+    // pairs and are stitched together with an ext.
+    let pairs = count / 2 + 1
+    let top = (count - 1) & ~1
+    @inline(__always) func reversalSource(_ p: Int) -> SIMD2<UInt64> {
+        nibbleReversedPair(pair(at: top &- 2 &* p))
+    }
+    // Reversal words 2p and 2p+1, from reversalSource(p) and reversalSource(p + 1).
+    @inline(__always) func reversedPair(upper: SIMD2<UInt64>, lower: SIMD2<UInt64>) -> SIMD2<UInt64> {
+        let between = SIMD2(upper[1], lower[0])
+        let low = oddCount ? between : upper
+        let high = oddCount ? lower : between
+        return (low &>> lowShift) | ((high &<< 1) &<< highShift)
+    }
+
+    // bcdAdd, lane-wise, split in two so a pair's generate (its carry-out with
+    // no carry-in) is known before its own carry-in is.
+    typealias Partial = (a: SIMD2<UInt64>, b: SIMD2<UInt64>, t1: SIMD2<UInt64>, t2: SIMD2<UInt64>, generate: SIMD2<UInt64>)
+    @inline(__always) func begin(_ p: Int, reversed b: SIMD2<UInt64>) -> Partial {
+        let a = pair(at: 2 &* p)
+        let t1 = a &+ sixes
+        let t2 = t1 &+ b
+        return (a, b, t1, t2, zero.replacing(with: .max, where: t2 .< t1))
+    }
+    var difference = zero
+    var missedCarries = zero
+    // Neither operand nor the sum can reach 0xFFFF..., so a lane carried out
+    // exactly when its result is below t1.
+    @inline(__always) func finish(_ p: Int, _ x: Partial, generateBelow: SIMD2<UInt64>) {
+        let carryIn = SIMD2(generateBelow[1], x.generate[0])
+        let sum = x.t2 &- carryIn
+        let carryOut = zero.replacing(with: .max, where: sum .< x.t1)
+        missedCarries |= carryOut ^ x.generate
+        difference |= x.a ^ x.b
+        let noCarry = nibbleLows & ~(sum ^ x.t1 ^ x.b)
+        let correction = (noCarry &>> 2) | (noCarry &>> 3) | (topSixes & ~carryOut)
+        rawDst.storeBytes(of: sum &- correction, toByteOffset: p &* 16, as: SIMD2<UInt64>.self)
+    }
+
+    // The next pass starts from this one's outermost pairs (the top word sets
+    // its shift, and each end is reversed from the other end), so pairs are
+    // finished from both ends inwards to get those done first. The top end runs
+    // one pair ahead so it has the generate of the word below.
+    var bottomUpper = reversalSource(0)
+    var bottomGenerate = zero
+    var topUpper = reversalSource(pairs - 1)
+    var topPartial = begin(pairs - 1, reversed: reversedPair(upper: topUpper, lower: reversalSource(pairs)))
+    for i in 0..<pairs / 2 {
+        let q = pairs &- 1 &- i
+        let nextUpper = reversalSource(q &- 1)
+        let next = begin(q &- 1, reversed: reversedPair(upper: nextUpper, lower: topUpper))
+        finish(q, topPartial, generateBelow: next.generate)
+        topPartial = next
+        topUpper = nextUpper
+
+        let bottomLower = reversalSource(i &+ 1)
+        let bottom = begin(i, reversed: reversedPair(upper: bottomUpper, lower: bottomLower))
+        finish(i, bottom, generateBelow: bottomGenerate)
+        bottomGenerate = bottom.generate
+        bottomUpper = bottomLower
+    }
+    if pairs & 1 == 1 {
+        finish(pairs / 2, topPartial, generateBelow: bottomGenerate)
+    }
+
+    if missedCarries != zero {
+        _ = reverseAndAddScalar(src, count: count, into: dst)
+    }
+    return difference == zero
 }
 
 nonisolated func checkPackedBCD(_ x: Int, maxIterations: Int) -> CheckResult {
-    // Each add grows the number by at most one digit, and Int has at most 19.
-    let capacity = (19 + maxIterations) / 16 + 2
+    // Each kept add grows the number by at most one digit, and Int has at most
+    // 19; reverseAndAddBCD touches 2 words past the top. Rounded up to whole
+    // pairs to keep each buffer 16-byte aligned.
+    let capacity = ((19 + max(maxIterations, 0)) / 16 + 3 + 1) & ~1
+    let bufferWords = bcdPadWords + capacity
 
-    return withUnsafeTemporaryAllocation(of: UInt64.self, capacity: capacity * 2) { buffer in
-        let current = buffer.baseAddress!
-        let reversed = current + capacity
+    return withUnsafeTemporaryAllocation(byteCount: 2 * bufferWords * 8, alignment: 16) { raw in
+        let buffer = raw.bindMemory(to: UInt64.self)
+        buffer.initialize(repeating: 0)
+        var current = buffer.baseAddress! + bcdPadWords
+        var next = current + bufferWords
 
         var count = 0
         var value = x
@@ -196,29 +346,13 @@ nonisolated func checkPackedBCD(_ x: Int, maxIterations: Int) -> CheckResult {
         } while value > 0
 
         var iterations = 0
-        while true {
-            reverseBCD(current, count: count, into: reversed)
-
-            var isPalindrome = true
-            for j in 0..<count where current[j] != reversed[j] {
-                isPalindrome = false
-                break
-            }
-            if isPalindrome { break }
-
+        while !reverseAndAddBCD(current, count: count, into: next) {
             iterations += 1
             if iterations > maxIterations {
                 return CheckResult(number: x, palindrome: "", steps: iterations, overflowed: false, exceededMaxIter: true)
             }
-
-            var carry: UInt64 = 0
-            for j in 0..<count {
-                (current[j], carry) = bcdAdd(current[j], reversed[j], carryIn: carry)
-            }
-            if carry != 0 {
-                current[count] = 1
-                count += 1
-            }
+            if next[count] != 0 { count += 1 }
+            swap(&current, &next)
         }
 
         var text = String(current[count - 1], radix: 16)
