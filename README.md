@@ -49,3 +49,7 @@ number,palindrome,steps,overflowed,exceeded_maxiter
 ## Building
 
 Open `Lychrel.xcodeproj` in Xcode and build either scheme (Release for the CLI, LychrelGUI for the app). Requires macOS 26.3 or later.
+
+## Licence
+
+MIT. See [LICENSE](LICENSE).
