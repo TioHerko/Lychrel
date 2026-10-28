@@ -220,13 +220,26 @@ private nonisolated func reverseAndAddBCD(_ src: UnsafeMutablePointer<UInt64>, c
         return reverseAndAddScalar(src, count: count, into: dst)
     }
     return count & 1 == 0
-        ? reverseAndAddPairs(src, count: count, into: dst, oddCount: false)
-        : reverseAndAddPairs(src, count: count, into: dst, oddCount: true)
+        ? reverseAndAddPairs(src, count: count, into: dst, parity: EvenWordCount.self)
+        : reverseAndAddPairs(src, count: count, into: dst, parity: OddWordCount.self)
 }
 
-// reverseAndAddBCD's loop, inlined once per parity so `oddCount` is a constant.
-@inline(__always)
-private nonisolated func reverseAndAddPairs(_ src: UnsafeMutablePointer<UInt64>, count: Int, into dst: UnsafeMutablePointer<UInt64>, oddCount: Bool) -> Bool {
+// The word count's parity as a type, so reverseAndAddPairs gets a specialized
+// copy for each with `isOdd` folded to a constant. (Passing a Bool literal to
+// each call instead lets the compiler merge them into one unspecialized call.)
+private nonisolated protocol WordCountParity {
+    static var isOdd: Bool { get }
+}
+private nonisolated enum EvenWordCount: WordCountParity {
+    static var isOdd: Bool { false }
+}
+private nonisolated enum OddWordCount: WordCountParity {
+    static var isOdd: Bool { true }
+}
+
+// reverseAndAddBCD's loop.
+private nonisolated func reverseAndAddPairs<Parity: WordCountParity>(_ src: UnsafeMutablePointer<UInt64>, count: Int, into dst: UnsafeMutablePointer<UInt64>, parity: Parity.Type) -> Bool {
+    let oddCount = Parity.isOdd
     let rawSrc = UnsafeRawPointer(src)
     let rawDst = UnsafeMutableRawPointer(dst)
     @inline(__always) func pair(at i: Int) -> SIMD2<UInt64> {
